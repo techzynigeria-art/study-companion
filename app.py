@@ -12,7 +12,7 @@ from openai import OpenAI
 from pypdf import PdfReader
 
 # ---------------------------------------------------------------------------
-# App Configuration & Settings
+# App Configuration & Custom UI Styling
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
@@ -20,6 +20,37 @@ st.set_page_config(
     page_icon="⚡",
     layout="centered"
 )
+
+# Custom CSS to style chat elements to look like a modern commercial AI app
+st.markdown("""
+    <style>
+    /* Main container background tweaks */
+    .stApp {
+        background-color: #FFFFFF;
+    }
+    
+    /* Style user chat bubbles */
+    div.stChatMessage[data-testid="stChatMessage-user"] {
+        background-color: #F0F2F5;
+        border-radius: 16px;
+        padding: 12px;
+        margin-bottom: 10px;
+        border: none;
+    }
+
+    /* Style assistant chat bubbles */
+    div.stChatMessage[data-testid="stChatMessage-assistant"] {
+        background-color: #FAFAFA;
+        border-radius: 16px;
+        padding: 12px;
+        margin-bottom: 10px;
+        border: 1px solid #E5E7EB;
+    }
+
+    /* Hide default Streamlit branding footer */
+    footer {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
 
 # OpenRouter auto-routes to an available free model
 DEFAULT_MODEL = "openrouter/auto"
@@ -146,7 +177,7 @@ api_key = get_setting("OPENROUTER_API_KEY")
 if not api_key:
     st.title("⚡ TECHY AI")
     st.error(
-        "No API key found. Add `OPENROUTER_API_KEY` to your Streamlit secrets panel."
+        "No API key found. Add `OPENROURAL_API_KEY` to your Streamlit secrets panel."
     )
     st.stop()
 
@@ -156,10 +187,10 @@ client = get_client(api_key)
 # Sidebar UI
 # ---------------------------------------------------------------------------
 
-st.sidebar.title("⚡ TECHY Settings")
+st.sidebar.title("⚡ TECHY Controls")
 st.sidebar.markdown("---")
 
-uploaded_pdf = st.sidebar.file_uploader("Upload Document (PDF)", type="pdf")
+uploaded_pdf = st.sidebar.file_uploader("Upload Study Document (PDF)", type="pdf")
 pdf_text = ""
 
 if uploaded_pdf is not None:
@@ -192,20 +223,21 @@ st.sidebar.button("Clear Conversation", on_click=clear_chat, use_container_width
 st.title("⚡ TECHY")
 st.caption("Your high-powered AI companion for coding, engineering, and learning.")
 
-# Render existing chat history in clean chat bubbles
+# Render existing chat history with custom avatars ("👤" for user, "⚡" for AI)
 for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
+    avatar = "👤" if message["role"] == "user" else "⚡"
+    with st.chat_message(message["role"], avatar=avatar):
         st.markdown(message["content"])
 
-# Bottom sticky chat input box
+# Bottom sticky chat input box (feels just like ChatGPT/Claude)
 if user_input := st.chat_input("Ask TECHY anything..."):
-    # Display user query
+    # Display user query instantly with user icon
     st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar="👤"):
         st.markdown(user_input)
 
-    # Stream AI response
-    with st.chat_message("assistant"):
+    # Stream AI response live with the tech lightning bolt avatar
+    with st.chat_message("assistant", avatar="⚡"):
         try:
             response_stream = stream_reply(
                 client,
