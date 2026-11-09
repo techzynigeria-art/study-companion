@@ -1,253 +1,398 @@
 """
-TECHY - A modern AI assistant & study companion built with Streamlit and OpenRouter.
-
-Run locally: streamlit run app.py
+TECHY AI v3 — Multimodal Smart Assistant
+Features: Image Gen • Web Search • YouTube • Video Analysis • TikTok (via Apify)
 """
 
-import io
-import os
-
+import io, os, json, time, base64, re
+from datetime import datetime
+import requests
 import streamlit as st
 from openai import OpenAI
 from pypdf import PdfReader
 
 # ---------------------------------------------------------------------------
-# App Configuration & Custom UI Styling
+# Config
 # ---------------------------------------------------------------------------
 
-st.set_page_config(
-    page_title="TECHY AI",
-    page_icon="⚡",
-    layout="centered"
-)
+st.set_page_config(page_title="TECHY AI", page_icon="⚡", layout="centered", initial_sidebar_state="expanded")
 
-# Custom CSS to style chat elements to look like a modern commercial AI app
 st.markdown("""
-    <style>
-    /* Main container background tweaks */
-    .stApp {
-        background-color: #FFFFFF;
-    }
-    
-    /* Style user chat bubbles */
-    div.stChatMessage[data-testid="stChatMessage-user"] {
-        background-color: #F0F2F5;
-        border-radius: 16px;
-        padding: 12px;
-        margin-bottom: 10px;
-        border: none;
-    }
-
-    /* Style assistant chat bubbles */
-    div.stChatMessage[data-testid="stChatMessage-assistant"] {
-        background-color: #FAFAFA;
-        border-radius: 16px;
-        padding: 12px;
-        margin-bottom: 10px;
-        border: 1px solid #E5E7EB;
-    }
-
-    /* Hide default Streamlit branding footer */
-    footer {visibility: hidden;}
-    </style>
+<style>
+#MainMenu, header, footer, .stDeployButton {visibility:hidden;}
+.stApp {background:#0E1117; color:#E2E8F0;}
+.stChatInput input {background:#1F2937!important; color:#FFF!important; border-radius:14px!important; border:1px solid #374151!important;}
+div[data-testid="stChatMessage-user"] {background:#1F2937; border-radius:16px; padding:14px; margin-bottom:12px;}
+div[data-testid="stChatMessage-assistant"] {background:#111827; border-radius:16px; padding:14px; margin-bottom:12px; border:1px solid #1F2937;}
+p, li, code {color:#E5E7EB!important; font-size:15px;}
+code {background:#0B1220!important; padding:2px 6px; border-radius:6px;}
+pre {background:#0B1220!important; border-radius:10px; padding:12px;}
+.techy-header {display:flex; align-items:center; gap:10px; padding:14px 18px; margin-bottom:18px; background:linear-gradient(90deg,#1E3A8A,#0F172A); border-radius:16px; border:1px solid #1F2937;}
+.techy-header h1 {margin:0; font-size:22px; color:#F9FAFB;}
+.techy-header span {color:#93C5FD; font-size:13px;}
+section[data-testid="stSidebar"] {background:#0B1220;}
+</style>
 """, unsafe_allow_html=True)
 
-# OpenRouter auto-routes to an available free model
 DEFAULT_MODEL = "openrouter/auto"
+MAX_HISTORY = 30
+MAX_PDF_CHARS = 150_000
 
-MAX_PDF_CHARS = 150_000      # Keeps big PDFs inside token limits
-MAX_HISTORY_MESSAGES = 20    # Recent messages sent to the model
+MODEL_OPTIONS = {
+    "Auto (best free)": "openrouter/auto",
+    "Claude 3.5 Sonnet": "anthropic/claude-3.5-sonnet",
+    "GPT-4o Mini": "openai/gpt-4o-mini",
+    "Gemini 2.0 Flash (video)": "google/gemini-2.0-flash-001",
+    "Llama 3.1 70B": "meta-llama/llama-3.1-70b-instruct",
+    "DeepSeek Chat": "deepseek/deepseek-chat",
+}
 
-# ---------------------------------------------------------------------------
-# Techy's Personality & Instructions
-# ---------------------------------------------------------------------------
-
-TECHY_PROMPT = """
-You are TECHY, an ultra-smart, friendly, and intuitive AI assistant and mentor.
-You excel at explaining complex technical ideas, engineering, coding, math, 
-physics, and general knowledge with absolute clarity.
-
-Style rules:
-- Speak naturally, warmly, and directly. Never say "As an AI language model" or 
-  talk about your restrictions unless specifically asked.
-- Use clear real-world analogies to make tricky topics easy to grasp (e.g., 
-  explaining voltage like water pressure or code functions like recipes).
-- For Math & Engineering: Break down steps clearly, state units, and check calculations.
-- For Programming: Write clean, modern, readable code snippets and explain what 
-  key lines do.
-- Keep responses engaging, well-structured, and concise using short paragraphs.
-- If a user's question is unclear, ask a quick clarifying question before answering.
-- Finish with an insightful follow-up question or small test when it helps solidify understanding.
-""".strip()
-
-PDF_RULES = """
-IMPORTANT - DOCUMENT MODE:
-The user has uploaded a document. Answer questions using ONLY the text below.
-- If the answer is not in the document, state clearly that it isn't covered. Do not guess.
-- Include page number references (e.g., [Page 3]) when available.
-""".strip()
+IMAGE_MODEL = "bytedance-seed/seedream-4.5"  # OpenRouter image model [citation:2]
 
 # ---------------------------------------------------------------------------
-# Helper Functions
+# Secrets
 # ---------------------------------------------------------------------------
 
 def get_setting(name):
-    """Read a value from Streamlit secrets first, then environment variables."""
-    try:
-        value = st.secrets[name]
-    except Exception:
-        value = None
-    return value or os.environ.get(name)
+    try: return st.secrets[name]
+    except Exception: pass
+    return os.environ.get(name)
 
+API_KEY = get_setting("OPENROUTER_API_KEY")
+YOUTUBE_KEY = get_setting("YOUTUBE_API_KEY")
+APIFY_TOKEN = get_setting("APIFY_TOKEN")  # optional, for TikTok
+
+if not API_KEY:
+    st.error("Missing OPENROUTER_API_KEY"); st.stop()
 
 @st.cache_resource
-def get_client(api_key):
-    """Initialize OpenAI client pointed at OpenRouter."""
-    return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
+def get_client(key): return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=key)
+
+client = get_client(API_KEY)
+
+# ---------------------------------------------------------------------------
+# System Prompt
+# ---------------------------------------------------------------------------
+
+TECHY_PROMPT = """
+You are TECHY, a smart, friendly AI assistant with access to tools.
+You can generate images, search the web, search YouTube, and analyze videos.
+
+RULES:
+- If the user asks for a picture/image, say you'll generate it and use the image tool.
+- If the user asks about current events, recent info, or "search for", use web search.
+- If the user asks about a YouTube video or channel, use YouTube search.
+- If the user provides a video link or asks to analyze a video, use video analysis.
+- If the user asks about a TikTok person, explain you'll try to look them up (may need Apify).
+- Cite sources with markdown links when using web search.
+- Be honest: if a tool fails, say so clearly.
+- Never fabricate facts, sources, or video content.
+""".strip()
+
+# ---------------------------------------------------------------------------
+# Tool Implementations
+# ---------------------------------------------------------------------------
+
+def generate_image(prompt: str):
+    """Generate an image via OpenRouter Image API [citation:2]"""
+    try:
+        r = requests.post(
+            "https://openrouter.ai/api/v1/images",
+            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+            json={"model": IMAGE_MODEL, "prompt": prompt},
+            timeout=120,
+        )
+        if not r.ok:
+            return None, f"Image API error: {r.status_code} — {r.text[:200]}"
+        data = r.json().get("data", [])
+        if not data or not data[0].get("b64_json"):
+            return None, "No image data returned."
+        img_bytes = base64.b64decode(data[0]["b64_json"])
+        return img_bytes, None
+    except Exception as e:
+        return None, str(e)
 
 
-@st.cache_data(show_spinner=False)
-def extract_pdf_text(file_bytes):
-    """Extract text from uploaded PDF with page markers."""
-    reader = PdfReader(io.BytesIO(file_bytes))
-    pages = []
-    for number, page in enumerate(reader.pages, start=1):
-        text = (page.extract_text() or "").strip()
-        if text:
-            pages.append(f"[Page {number}]\n{text}")
-    return "\n\n".join(pages)
+def web_search(query: str):
+    """Use OpenRouter web plugin for grounded search [citation:8]"""
+    try:
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "openrouter/auto",
+                "messages": [{"role": "user", "content": query}],
+                "plugins": [{"id": "web"}],
+            },
+            timeout=60,
+        )
+        if not r.ok:
+            return None, f"Search error: {r.status_code} — {r.text[:200]}"
+        return r.json()["choices"][0]["message"]["content"], None
+    except Exception as e:
+        return None, str(e)
 
 
-def build_system_prompt(pdf_text):
-    if not pdf_text:
-        return TECHY_PROMPT
-    return (
-        TECHY_PROMPT
-        + "\n\n"
-        + PDF_RULES
-        + "\n\n--- START OF DOCUMENT ---\n"
-        + pdf_text
-        + "\n--- END OF DOCUMENT ---"
-    )
+def youtube_search(query: str, max_results=5):
+    """Search YouTube via Data API v3 [citation:5]"""
+    if not YOUTUBE_KEY:
+        return None, "YOUTUBE_API_KEY not set in secrets."
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/youtube/v3/search",
+            params={
+                "part": "snippet", "q": query, "type": "video",
+                "maxResults": max_results, "key": YOUTUBE_KEY,
+            },
+            timeout=15,
+        )
+        if not r.ok:
+            return None, f"YouTube error: {r.status_code} — {r.text[:200]}"
+        items = r.json().get("items", [])
+        lines = [f"**YouTube results for:** `{query}`\n"]
+        for it in items:
+            sn = it["snippet"]
+            vid = it["id"]["videoId"]
+            lines.append(
+                f"- **{sn['title']}** — {sn['channelTitle']}  \n"
+                f"  https://youtube.com/watch?v={vid}  \n"
+                f"  _{sn.get('description','')[:140]}..._"
+            )
+        return "\n".join(lines), None
+    except Exception as e:
+        return None, str(e)
 
 
-def stream_reply(client, system_prompt, messages):
-    """Stream AI responses chunk by chunk."""
-    formatted_messages = [{"role": "system", "content": system_prompt}]
-    for m in messages[-MAX_HISTORY_MESSAGES:]:
-        formatted_messages.append({"role": m["role"], "content": m["content"]})
+def analyze_video(video_url: str, question: str):
+    """Analyze a YouTube video or video URL via OpenRouter multimodal [citation:7]"""
+    try:
+        # OpenRouter video input: use content array with input_video
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "google/gemini-2.0-flash-001",  # video-capable [citation:7]
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": question},
+                        {"type": "video_url", "video_url": {"url": video_url}},
+                    ],
+                }],
+            },
+            timeout=120,
+        )
+        if not r.ok:
+            return None, f"Video error: {r.status_code} — {r.text[:300]}"
+        return r.json()["choices"][0]["message"]["content"], None
+    except Exception as e:
+        return None, str(e)
 
-    model = get_setting("OPENROUTER_MODEL") or DEFAULT_MODEL
 
+def tiktok_lookup(username: str):
+    """TikTok lookup via Apify (optional, paid) [citation:14]"""
+    if not APIFY_TOKEN:
+        return None, ("TikTok lookup requires an APIFY_TOKEN. "
+                      "TikTok has no free official search API. Add APIFY_TOKEN to secrets.")
+    try:
+        # Apify actor run (simplified — real actor ID may vary)
+        r = requests.post(
+            f"https://api.apify.com/v2/acts/clockworks~tiktok-scraper/runs",
+            params={"token": APIFY_TOKEN},
+            json={"profiles": [username], "resultsPerPage": 5},
+            timeout=60,
+        )
+        if not r.ok:
+            return None, f"Apify error: {r.status_code} — {r.text[:200]}"
+        run_id = r.json()["data"]["id"]
+        # Poll briefly
+        for _ in range(10):
+            time.sleep(3)
+            s = requests.get(
+                f"https://api.apify.com/v2/actor-runs/{run_id}",
+                params={"token": APIFY_TOKEN}, timeout=15,
+            ).json()
+            if s["data"]["status"] == "SUCCEEDED":
+                dataset_id = s["data"]["defaultDatasetId"]
+                items = requests.get(
+                    f"https://api.apify.com/v2/datasets/{dataset_id}/items",
+                    params={"token": APIFY_TOKEN}, timeout=15,
+                ).json()
+                if not items:
+                    return f"No TikTok data found for `{username}`.", None
+                top = items[0]
+                return (
+                    f"**TikTok: @{top.get('authorMeta',{}).get('name', username)}**\n"
+                    f"- Followers: {top.get('authorMeta',{}).get('fans','?')}\n"
+                    f"- Bio: {top.get('authorMeta',{}).get('signature','')[:150]}\n"
+                    f"- Top video: {top.get('text','')[:120]}\n"
+                    f"- URL: {top.get('webVideoUrl','')}"
+                ), None
+        return None, "Apify run timed out."
+    except Exception as e:
+        return None, str(e)
+
+# ---------------------------------------------------------------------------
+# Router — decides which tool to use
+# ---------------------------------------------------------------------------
+
+def route_and_execute(user_input: str, chat_history):
+    """Detect intent and call the right tool. Returns (tool_name, result, error)."""
+    text = user_input.lower()
+
+    # Image generation
+    if any(k in text for k in ["generate image", "draw", "create picture", "make an image", "picture of"]):
+        prompt = re.sub(r"(generate|create|make|draw).*?(image|picture|of)", "", user_input, flags=re.I).strip()
+        prompt = prompt or user_input
+        img, err = generate_image(prompt)
+        return ("image", img, err)
+
+    # YouTube search
+    if "youtube" in text or ("search" in text and "video" in text):
+        q = re.sub(r"(search|find|look up).*?(youtube|for)", "", user_input, flags=re.I).strip()
+        q = q or user_input
+        res, err = youtube_search(q)
+        return ("youtube", res, err)
+
+    # TikTok
+    if "tiktok" in text:
+        match = re.search(r"@?([A-Za-z0-9_.]+)", user_input.split("tiktok")[-1])
+        user = match.group(1) if match else ""
+        res, err = tiktok_lookup(user)
+        return ("tiktok", res, err)
+
+    # Video analysis (if a video URL is present)
+    video_url = None
+    for pattern in [r"(https?://(?:www\.)?youtube\.com/watch\?v=[\w-]+)",
+                    r"(https?://youtu\.be/[\w-]+)"]:
+        m = re.search(pattern, user_input)
+        if m: video_url = m.group(1); break
+    if video_url:
+        q = user_input.replace(video_url, "").strip() or "Summarize this video."
+        res, err = analyze_video(video_url, q)
+        return ("video", res, err)
+
+    # Web search
+    if any(k in text for k in ["search", "latest", "news", "current", "who is", "what is happening"]):
+        res, err = web_search(user_input)
+        return ("web", res, err)
+
+    return (None, None, None)  # no tool needed → use LLM directly
+
+# ---------------------------------------------------------------------------
+# Stream LLM reply (no tool)
+# ---------------------------------------------------------------------------
+
+def stream_reply(messages, model, temperature, max_tokens):
+    formatted = [{"role": "system", "content": TECHY_PROMPT}]
+    for m in messages[-MAX_HISTORY:]:
+        formatted.append({"role": m["role"], "content": m["content"]})
     stream = client.chat.completions.create(
-        model=model,
-        messages=formatted_messages,
-        stream=True,
-        temperature=0.6,
+        model=model, messages=formatted, stream=True,
+        temperature=temperature, max_tokens=max_tokens,
     )
     for chunk in stream:
-        if chunk.choices[0].delta.content:
+        if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
-
-def friendly_error(error):
-    text = str(error)
-    if "API key" in text or "401" in text or "403" in text:
-        return "API Key issue detected. Please check your Streamlit secrets setup."
-    if "429" in text:
-        return "Free limit temporarily reached. Give it a minute and try again."
-    return f"Something went wrong: {text}"
-
-
-def clear_chat():
-    st.session_state.messages = []
-
-
 # ---------------------------------------------------------------------------
-# App Initialization & Secrets Check
+# Session State
 # ---------------------------------------------------------------------------
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-api_key = get_setting("OPENROUTER_API_KEY")
-if not api_key:
-    st.title("⚡ TECHY AI")
-    st.error(
-        "No API key found. Add `OPENROURAL_API_KEY` to your Streamlit secrets panel."
-    )
-    st.stop()
-
-client = get_client(api_key)
+for k, v in [("messages", []), ("pdf_text", ""), ("pdf_name", None), ("last_usage", None)]:
+    st.session_state.setdefault(k, v)
 
 # ---------------------------------------------------------------------------
-# Sidebar UI
+# Sidebar
 # ---------------------------------------------------------------------------
 
-st.sidebar.title("⚡ TECHY Controls")
-st.sidebar.markdown("---")
+with st.sidebar:
+    st.markdown("## ⚡ TECHY Controls")
+    st.caption("Multimodal smart assistant")
 
-uploaded_pdf = st.sidebar.file_uploader("Upload Study Document (PDF)", type="pdf")
-pdf_text = ""
+    st.markdown("### 🧠 Model (chat)")
+    model_label = st.selectbox("Model", list(MODEL_OPTIONS.keys()), label_visibility="collapsed")
+    selected_model = MODEL_OPTIONS[model_label]
 
-if uploaded_pdf is not None:
-    try:
-        pdf_text = extract_pdf_text(uploaded_pdf.getvalue())
-        read_failed = False
-    except Exception:
-        pdf_text = ""
-        read_failed = True
+    st.markdown("### 🎛️ Tuning")
+    temperature = st.slider("Temperature", 0.0, 1.2, 0.6, 0.1)
+    max_tokens = st.slider("Max tokens", 256, 4096, 1024, 128)
 
-    if read_failed:
-        st.sidebar.error("Could not read this PDF file.")
-    elif not pdf_text:
-        st.sidebar.warning("No readable text found in this document.")
-    else:
-        if len(pdf_text) > MAX_PDF_CHARS:
-            pdf_text = pdf_text[:MAX_PDF_CHARS]
-            st.sidebar.warning("Using the first section of this long PDF.")
-        st.sidebar.success(f"Loaded: {uploaded_pdf.name}")
-else:
-    st.sidebar.caption("No document attached. TECHY is using general knowledge.")
+    st.markdown("---")
+    st.markdown("### 📄 PDF Context")
+    up = st.file_uploader("Upload PDF", type="pdf")
+    if up:
+        try:
+            reader = PdfReader(io.BytesIO(up.getvalue()))
+            pages = []
+            for i, p in enumerate(reader.pages, 1):
+                t = (p.extract_text() or "").strip()
+                if t: pages.append(f"[Page {i}]\n{t}")
+            st.session_state.pdf_text = "\n\n".join(pages)[:MAX_PDF_CHARS]
+            st.session_state.pdf_name = up.name
+            st.success(f"Loaded: {up.name}")
+        except Exception as e:
+            st.error(f"PDF error: {e}")
 
-st.sidebar.markdown("---")
-st.sidebar.button("Clear Conversation", on_click=clear_chat, use_container_width=True)
+    st.markdown("---")
+    st.markdown("### 🛠️ Actions")
+    if st.button("🧹 Clear Chat", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.last_usage = None
+        st.rerun()
+
+    if st.session_state.last_usage:
+        u = st.session_state.last_usage
+        st.caption(f"⏱️ {u['elapsed']:.1f}s • {u['tool']}")
 
 # ---------------------------------------------------------------------------
-# Main Chat UI
+# Header + Chat History
 # ---------------------------------------------------------------------------
 
-st.title("⚡ TECHY")
-st.caption("Your high-powered AI companion for coding, engineering, and learning.")
+st.markdown("""
+<div class="techy-header">
+  <div style="font-size:28px;">⚡</div>
+  <div><h1>TECHY v3</h1><span>Image gen • Web • YouTube • Video • TikTok</span></div>
+</div>
+""", unsafe_allow_html=True)
 
-# Render existing chat history with custom avatars ("👤" for user, "⚡" for AI)
-for message in st.session_state.messages:
-    avatar = "👤" if message["role"] == "user" else "⚡"
-    with st.chat_message(message["role"], avatar=avatar):
-        st.markdown(message["content"])
+for msg in st.session_state.messages:
+    avatar = "👤" if msg["role"] == "user" else "⚡"
+    with st.chat_message(msg["role"], avatar=avatar):
+        st.markdown(msg["content"])
+        if msg.get("image"):
+            st.image(msg["image"], caption="Generated by TECHY")
 
-# Bottom sticky chat input box (feels just like ChatGPT/Claude)
-if user_input := st.chat_input("Ask TECHY anything..."):
-    # Display user query instantly with user icon
+# ---------------------------------------------------------------------------
+# Input & Tool Execution
+# ---------------------------------------------------------------------------
+
+if user_input := st.chat_input("Ask TECHY anything — or say 'draw a cat', 'search the web for...', 'youtube search...'"):
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user", avatar="👤"):
         st.markdown(user_input)
 
-    # Stream AI response live with the tech lightning bolt avatar
-    with st.chat_message("assistant", avatar="⚡"):
-        try:
-            response_stream = stream_reply(
-                client,
-                build_system_prompt(pdf_text),
-                st.session_state.messages,
-            )
-            reply_text = st.write_stream(response_stream)
-        except Exception as err:
-            reply_text = None
-            st.error(friendly_error(err))
+    start = time.time()
+    tool, result, err = route_and_execute(user_input, st.session_state.messages)
 
-        if reply_text and str(reply_text).strip():
-            st.session_state.messages.append({"role": "assistant", "content": reply_text})
+    with st.chat_message("assistant", avatar="⚡"):
+        if tool == "image" and result:
+            st.image(result, caption="Generated image")
+            text = "Here's the image I generated 🎨"
+            st.session_state.messages.append({"role": "assistant", "content": text, "image": result})
+        elif tool and result:
+            st.markdown(result)
+            st.session_state.messages.append({"role": "assistant", "content": result})
+        elif tool and err:
+            st.warning(f"Tool `{tool}` failed: {err}")
+            st.session_state.messages.append({"role": "assistant", "content": f"⚠️ Tool error: {err}"})
+        else:
+            # Normal LLM stream
+            try:
+                stream = stream_reply(st.session_state.messages, selected_model, temperature, max_tokens)
+                reply = st.write_stream(stream)
+                if reply and reply.strip():
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+            except Exception as e:
+                st.error(f"LLM error: {e}")
+
+    st.session_state.last_usage = {"elapsed": time.time() - start, "tool": tool or "llm"}
