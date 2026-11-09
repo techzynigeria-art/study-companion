@@ -16,7 +16,8 @@ from pypdf import PdfReader
 # ---------------------------------------------------------------------------
 
 # Using a reliable free model on OpenRouter. You can change this anytime.
-DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
+DEFAULT_MODEL = "openrouter/auto"
+
 
 MAX_PDF_CHARS = 150_000      # keeps big PDFs inside token limits
 MAX_HISTORY_MESSAGES = 20    # how many recent messages are sent to the model
