@@ -1,5 +1,5 @@
 """
-Study Companion - a minimal AI tutor built with Streamlit and the Gemini API.
+Study Companion - a minimal AI tutor built with Streamlit and OpenRouter.
 
 Run it with:   streamlit run app.py
 """
@@ -8,24 +8,17 @@ import io
 import os
 
 import streamlit as st
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from pypdf import PdfReader
 
 # ---------------------------------------------------------------------------
 # Settings you may want to change
 # ---------------------------------------------------------------------------
 
-# Models are tried in this order. If one is unavailable (retired, or its free
-# daily limit is used up), the next one is tried automatically.
-# To force a specific model, add  GEMINI_MODEL = "model-name"  to your secrets.
-DEFAULT_MODELS = [
-    "gemini-3.1-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-2.5-flash",
-]
+# Using a reliable free model on OpenRouter. You can change this anytime.
+DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
 
-MAX_PDF_CHARS = 150_000      # keeps big PDFs inside the free-tier token limits
+MAX_PDF_CHARS = 150_000      # keeps big PDFs inside token limits
 MAX_HISTORY_MESSAGES = 20    # how many recent messages are sent to the model
 
 # ---------------------------------------------------------------------------
@@ -93,7 +86,11 @@ def get_setting(name):
 
 @st.cache_resource
 def get_client(api_key):
-    return genai.Client(api_key=api_key)
+    # Initialize OpenAI client pointing to OpenRouter
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -122,60 +119,35 @@ def build_system_prompt(pdf_text):
 
 
 def stream_reply(client, system_prompt, messages):
-    """Ask Gemini for a reply and yield it piece by piece."""
-    contents = [
-        types.Content(
-            role="user" if m["role"] == "user" else "model",
-            parts=[types.Part(text=m["content"])],
+    """Ask OpenRouter for a reply and yield it piece by piece."""
+    # Convert message format to OpenAI message structure
+    formatted_messages = [{"role": "system", "content": system_prompt}]
+    for m in messages[-MAX_HISTORY_MESSAGES:]:
+        role = "user" if m["role"] == "user" else "assistant"
+        formatted_messages.append({"role": role, "content": m["content"]})
+
+    model = get_setting("OPENROUTER_MODEL") or DEFAULT_MODEL
+
+    try:
+        stream = client.chat.completions.create(
+            model=model,
+            messages=formatted_messages,
+            stream=True,
+            temperature=0.6,
         )
-        for m in messages[-MAX_HISTORY_MESSAGES:]
-    ]
-    config = types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        temperature=0.6,
-    )
-
-    # Build the list of models to try (custom model first, then the last one that worked).
-    models = list(DEFAULT_MODELS)
-    custom = get_setting("GEMINI_MODEL")
-    if custom:
-        models.insert(0, custom)
-    working = st.session_state.get("working_model")
-    if working in models:
-        models.remove(working)
-        models.insert(0, working)
-
-    last_error = None
-    for model in models:
-        started = False
-        try:
-            for chunk in client.models.generate_content_stream(
-                model=model, contents=contents, config=config
-            ):
-                if chunk.text:
-                    started = True
-                    yield chunk.text
-            st.session_state.working_model = model
-            return
-        except Exception as error:
-            last_error = error
-            code = getattr(error, "code", None)
-            # 404 = model gone, 429 = free limit reached, 503 = model busy.
-            # In those cases (before any text was shown) try the next model.
-            if started or code not in (404, 429, 503):
-                raise
-    raise last_error
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+    except Exception as error:
+        raise error
 
 
 def friendly_error(error):
-    code = getattr(error, "code", None)
     text = str(error)
-    if "API key" in text or code in (401, 403):
-        return "The API key was rejected. Check that it is copied correctly in your secrets file."
-    if code == 429:
-        return "The free usage limit was reached. Wait a minute and try again."
-    if code in (404, 503):
-        return "No Gemini model is available right now. Try again later, or set GEMINI_MODEL in your secrets."
+    if "API key" in text or "401" in text or "403" in text:
+        return "The OpenRouter API key was rejected. Check that it is copied correctly in your secrets."
+    if "429" in text:
+        return "The free usage limit was reached. Wait a moment and try again."
     return f"Something went wrong: {text}"
 
 
@@ -197,12 +169,13 @@ st.set_page_config(page_title="Study Companion", layout="centered")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-api_key = get_setting("GEMINI_API_KEY") or get_setting("GOOGLE_API_KEY")
+# Look for OpenRouter API key in Streamlit secrets
+api_key = get_setting("OPENROUTER_API_KEY")
 if not api_key:
     st.title("Study Companion")
     st.error(
-        "No API key found. Create the file .streamlit/secrets.toml and add:\n\n"
-        'GEMINI_API_KEY = "your-key-here"'
+        "No API key found. Create your Streamlit secret and add:\n\n"
+        'OPENROUTER_API_KEY = "your-openrouter-key-here"'
     )
     st.stop()
 
